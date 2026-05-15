@@ -1,0 +1,337 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Stage 1 — Version OR detect a release-ready commit.
+  #
+  # When pending changesets exist, changesets/action opens or updates the
+  # "Release: version packages" PR (FR-1) and exits without releasing.
+  # When that PR has been merged (no pending changesets, package.json version
+  # bumped), this job's `detect` step recognises that a tag for the current
+  # version does not yet exist and signals downstream jobs to run.
+  # ---------------------------------------------------------------------------
+  version-or-detect:
+    name: Open release PR or detect release-ready commit
+    runs-on: ubuntu-22.04
+    outputs:
+      should-release: ${{ steps.detect.outputs.should-release }}
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - name: Checkout (with full history for tag lookup)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Open / update Release PR (Changesets)
+        uses: changesets/action@v1
+        with:
+          version: npx changeset version
+          commit: "release: version packages"
+          title: "Release: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect whether this commit needs releasing
+        id: detect
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="v${version}"
+
+          if [ "${version}" = "0.0.0" ]; then
+            echo "package.json still at 0.0.0; no release."
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git rev-parse "${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists; nothing to release."
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag ${tag} does not exist; releasing."
+            echo "should-release=true" >> "$GITHUB_OUTPUT"
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Stage 2 — Build the deployable artifact from a fresh checkout (FR-2),
+  # embed version metadata into it (FR-3), and hand it off to later jobs.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build artifact
+    needs: version-or-detect
+    if: needs.version-or-detect.outputs.should-release == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Embed version.json into public/
+        env:
+          RELEASE_VERSION: ${{ needs.version-or-detect.outputs.version }}
+        run: npm run embed-version
+
+      - name: Package artifact (tarball of public/)
+        env:
+          RELEASE_VERSION: ${{ needs.version-or-detect.outputs.version }}
+        run: npm run package-artifact
+
+      - name: Upload artifact for downstream jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-v${{ needs.version-or-detect.outputs.version }}
+          path: |
+            public/version.json
+            dist/jerling-org-v${{ needs.version-or-detect.outputs.version }}.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Stage 3 — Run E2E tests against the *built* artifact (FR-4). The artifact
+  # is unpacked into public/ before Playwright starts the static server, so
+  # tests exercise the exact bytes that will be deployed.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test built artifact
+    needs: [version-or-detect, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout (for tests and config)
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download built artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site-v${{ needs.version-or-detect.outputs.version }}
+          path: artifact/
+
+      - name: Unpack artifact over public/
+        run: |
+          rm -rf public
+          tar -xzf "artifact/dist/jerling-org-v${{ needs.version-or-detect.outputs.version }}.tar.gz"
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        run: npm run test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-release-v${{ needs.version-or-detect.outputs.version }}
+          path: playwright-report/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Stage 4 — Tag the commit and publish a GitHub Release (FR-5, FR-6, FR-7).
+  # The annotated tag is created via the GitHub API so GitHub signs it
+  # server-side and renders the "Verified" badge. The Release body is the
+  # entry for this version extracted from CHANGELOG.md, and the tarball is
+  # attached as a Release asset.
+  # ---------------------------------------------------------------------------
+  publish-release:
+    name: Tag and publish GitHub Release
+    needs: [version-or-detect, test]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download built artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site-v${{ needs.version-or-detect.outputs.version }}
+          path: artifact/
+
+      - name: Create annotated tag via GitHub API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version-or-detect.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Step 1: create the annotated tag object.
+          tag_sha=$(gh api \
+            "repos/${{ github.repository }}/git/tags" \
+            -f tag="v${VERSION}" \
+            -f message="Release v${VERSION}" \
+            -f object="${SHA}" \
+            -f type=commit \
+            --jq .sha)
+
+          echo "Created tag object ${tag_sha} for v${VERSION}"
+
+          # Step 2: create the ref that points at the tag object.
+          gh api \
+            "repos/${{ github.repository }}/git/refs" \
+            -f ref="refs/tags/v${VERSION}" \
+            -f sha="${tag_sha}" >/dev/null
+
+          echo "Pushed ref refs/tags/v${VERSION}"
+
+      - name: Extract changelog entry for this version
+        id: changelog
+        env:
+          VERSION: ${{ needs.version-or-detect.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          awk -v v="${VERSION}" '
+            /^## / {
+              if (in_section) exit
+              if ($2 == v) { in_section = 1; next }
+            }
+            in_section { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog entry found for v${VERSION}; using fallback note."
+            printf "Release v%s.\n\nNo changelog entry was extracted; see CHANGELOG.md.\n" \
+              "${VERSION}" > release-notes.md
+          fi
+
+          echo "--- release-notes.md ---"
+          cat release-notes.md
+          echo "--- end ---"
+
+      - name: Create GitHub Release with artifact attached
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version-or-detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          asset="artifact/dist/jerling-org-v${VERSION}.tar.gz"
+          test -f "${asset}" || { echo "missing artifact ${asset}"; exit 1; }
+          gh release create "v${VERSION}" "${asset}" \
+            --title "v${VERSION}" \
+            --notes-file release-notes.md \
+            --verify-tag
+
+  # ---------------------------------------------------------------------------
+  # Stage 5 — Deploy the same artifact to production (FR-8). The `production`
+  # environment is configured in GitHub with a single required reviewer
+  # (FR-9), which pauses the workflow here until a human approves. The
+  # deploy step uses the exact tarball that was tested and released.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to production
+    needs: [version-or-detect, publish-release]
+    runs-on: ubuntu-22.04
+    environment:
+      name: production
+      url: https://jerling.org
+    steps:
+      - name: Checkout (for firebase.json, .firebaserc)
+        uses: actions/checkout@v4
+
+      - name: Download built artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site-v${{ needs.version-or-detect.outputs.version }}
+          path: artifact/
+
+      - name: Unpack artifact over public/
+        env:
+          VERSION: ${{ needs.version-or-detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf public
+          tar -xzf "artifact/dist/jerling-org-v${VERSION}.tar.gz"
+          test -f public/version.json
+          echo "Deploying public/ with version $(cat public/version.json)"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install firebase-tools (pinned)
+        run: npm install -g firebase-tools@13.29.1
+
+      - name: Write service-account credentials
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FIREBASE_SERVICE_ACCOUNT_JSON}" ]; then
+            echo "FIREBASE_SERVICE_ACCOUNT_JSON secret is not set." >&2
+            exit 1
+          fi
+          umask 077
+          printf '%s' "${FIREBASE_SERVICE_ACCOUNT_JSON}" > "${RUNNER_TEMP}/sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=${RUNNER_TEMP}/sa.json" >> "$GITHUB_ENV"
+
+      - name: Deploy to Firebase Hosting
+        env:
+          VERSION: ${{ needs.version-or-detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          firebase deploy \
+            --only hosting \
+            --project jerling-org \
+            --non-interactive \
+            --message "Release v${VERSION} (sha ${GITHUB_SHA})"
+
+      - name: Append deploy log to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version-or-detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Deployed:** $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "**Approved by:** ${{ github.actor }}"
+            echo "**Environment:** production"
+            echo "**SHA:** \`${GITHUB_SHA}\`"
+            echo "**Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > deploy-note.md
+
+          existing_notes=$(gh release view "v${VERSION}" --json body --jq .body)
+          printf '%s\n%s\n' "${existing_notes}" "$(cat deploy-note.md)" > combined-notes.md
+          gh release edit "v${VERSION}" --notes-file combined-notes.md
