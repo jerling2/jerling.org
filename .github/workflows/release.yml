@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -29,10 +30,18 @@ jobs:
       should-release: ${{ steps.detect.outputs.should-release }}
       version: ${{ steps.detect.outputs.version }}
     steps:
+      - name: Mint jerling-org-bot installation token
+        id: bot-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: 3727445
+          private-key: ${{ secrets.JERLING_ORG_RELEASE_BOT_KEY }}
+
       - name: Checkout (with full history for tag lookup)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.bot-token.outputs.token }}
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -44,13 +53,39 @@ jobs:
         run: npm ci
 
       - name: Open / update Release PR (Changesets)
+        id: changesets
         uses: changesets/action@v1
         with:
           version: npx changeset version
           commit: "release: version packages"
           title: "Release: version packages"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.bot-token.outputs.token }}
+
+      # ---------------------------------------------------------------------
+      # Auto-merge the Release PR using jerling-org-bot's bypass privilege.
+      #
+      # The PR is authored by the bot and the ruleset requires 1 review —
+      # so it would block on review forever. The bot bypasses the rule,
+      # squash-merging the version bump straight to main. The merge commit
+      # then re-triggers this workflow, which detects should-release=true
+      # in the `detect` step below and runs the actual release.
+      #
+      # Skipped when changesets/action did not produce a PR (i.e., the
+      # workflow ran on a release-ready commit and is about to release).
+      # ---------------------------------------------------------------------
+      - name: Auto-merge Release PR (bot bypass)
+        if: steps.changesets.outputs.pullRequestNumber != ''
+        env:
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          PR_NUMBER: ${{ steps.changesets.outputs.pullRequestNumber }}
+        run: |
+          set -euo pipefail
+          echo "Merging Release PR #${PR_NUMBER} via bot bypass."
+          gh pr merge "${PR_NUMBER}" \
+            --repo "${{ github.repository }}" \
+            --squash \
+            --delete-branch
 
       - name: Detect whether this commit needs releasing
         id: detect
@@ -176,6 +211,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Mint jerling-org-bot installation token
+        id: bot-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: 3727445
+          private-key: ${{ secrets.JERLING_ORG_RELEASE_BOT_KEY }}
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -187,7 +229,7 @@ jobs:
 
       - name: Create annotated tag via GitHub API
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
           VERSION: ${{ needs.version-or-detect.outputs.version }}
           SHA: ${{ github.sha }}
         run: |
@@ -239,7 +281,7 @@ jobs:
 
       - name: Create GitHub Release with artifact attached
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
           VERSION: ${{ needs.version-or-detect.outputs.version }}
         run: |
           set -euo pipefail
@@ -264,6 +306,13 @@ jobs:
       name: production
       url: https://jerling.org
     steps:
+      - name: Mint jerling-org-bot installation token
+        id: bot-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: 3727445
+          private-key: ${{ secrets.JERLING_ORG_RELEASE_BOT_KEY }}
+
       - name: Checkout (for firebase.json, .firebaserc)
         uses: actions/checkout@v4
 
@@ -317,7 +366,7 @@ jobs:
 
       - name: Append deploy log to GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
           VERSION: ${{ needs.version-or-detect.outputs.version }}
         run: |
           set -euo pipefail

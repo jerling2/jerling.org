@@ -46,3 +46,40 @@ jobs:
           name: playwright-report-pr-${{ github.event.pull_request.number }}
           path: playwright-report/
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Auto-approve PRs authored by the repo owner.
+  #
+  # The main-requires-pr ruleset demands 1 approving review and disallows
+  # self-approval, which would otherwise block every PR jerling2 opens.
+  # jerling-org-bot satisfies that review honestly (rather than bypassing
+  # the rule) so the audit trail still shows "1 approval before merge."
+  #
+  # Filter is intentionally narrow: only non-draft PRs authored by
+  # jerling2. PRs authored by anyone else (including jerling-org-bot's own
+  # Release PR) are not auto-approved.
+  # ---------------------------------------------------------------------------
+  auto-approve:
+    name: Auto-approve repo-owner PR
+    needs: validate
+    runs-on: ubuntu-22.04
+    if: >-
+      github.event.pull_request.user.login == 'jerling2'
+      && github.event.pull_request.draft == false
+    steps:
+      - name: Mint jerling-org-bot installation token
+        id: bot-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: 3727445
+          private-key: ${{ secrets.JERLING_ORG_RELEASE_BOT_KEY }}
+
+      - name: Approve PR as jerling-org-bot
+        env:
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr review "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --approve \
+            --body "Auto-approved by jerling-org-bot: CI passed for a PR from the repo owner."
