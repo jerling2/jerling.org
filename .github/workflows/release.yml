@@ -32,19 +32,19 @@ jobs:
     steps:
       - name: Mint jerling-org-bot installation token
         id: bot-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: 3727445
           private-key: ${{ secrets.JERLING_ORG_RELEASE_BOT_KEY }}
 
       - name: Checkout (with full history for tag lookup)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ steps.bot-token.outputs.token }}
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -119,10 +119,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -141,7 +141,7 @@ jobs:
         run: npm run package-artifact
 
       - name: Upload artifact for downstream jobs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: site-v${{ needs.version-or-detect.outputs.version }}
           path: |
@@ -161,10 +161,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout (for tests and config)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -173,7 +173,7 @@ jobs:
         run: npm ci
 
       - name: Download built artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: site-v${{ needs.version-or-detect.outputs.version }}
           path: artifact/
@@ -191,7 +191,7 @@ jobs:
 
       - name: Upload Playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-release-v${{ needs.version-or-detect.outputs.version }}
           path: playwright-report/
@@ -213,16 +213,16 @@ jobs:
     steps:
       - name: Mint jerling-org-bot installation token
         id: bot-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: 3727445
           private-key: ${{ secrets.JERLING_ORG_RELEASE_BOT_KEY }}
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download built artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: site-v${{ needs.version-or-detect.outputs.version }}
           path: artifact/
@@ -308,16 +308,16 @@ jobs:
     steps:
       - name: Mint jerling-org-bot installation token
         id: bot-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: 3727445
           private-key: ${{ secrets.JERLING_ORG_RELEASE_BOT_KEY }}
 
       - name: Checkout (for firebase.json, .firebaserc)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download built artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: site-v${{ needs.version-or-detect.outputs.version }}
           path: artifact/
@@ -333,7 +333,7 @@ jobs:
           echo "Deploying public/ with version $(cat public/version.json)"
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
 
