@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0
+
+### Minor Changes
+
+- 2893e6c: Users see a backlink to the github repo on jerling.org
+
+### Patch Changes
+
+- 2893e6c: smoke test for release.yml workflow.
+
 ## 0.0.1
 
 ### Patch Changes
