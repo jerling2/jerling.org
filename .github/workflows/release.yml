@@ -52,15 +52,74 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Open / update Release PR (Changesets)
-        id: changesets
-        uses: changesets/action@v1
-        with:
-          version: npx changeset version
-          commit: "release: version packages"
-          title: "Release: version packages"
+      # ---------------------------------------------------------------------
+      # Apply pending changesets (bumps package.json + writes CHANGELOG.md
+      # + deletes consumed .changeset/*.md files), then signal downstream
+      # steps whether anything actually changed.
+      # ---------------------------------------------------------------------
+      - name: Apply pending changesets
+        id: cs-version
+        run: |
+          set -euo pipefail
+          npx changeset version
+          if [[ -n "$(git status --porcelain)" ]]; then
+            version=$(node -p "require('./package.json').version")
+            echo "has-changes=true" >> "$GITHUB_OUTPUT"
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+            echo "Pending changesets bump version to ${version}."
+          else
+            echo "has-changes=false" >> "$GITHUB_OUTPUT"
+            echo "No pending changesets."
+          fi
+
+      # ---------------------------------------------------------------------
+      # Build the Release PR body from the CHANGELOG entry that `changeset
+      # version` just wrote. Mimics the per-changeset summary that
+      # changesets/action used to provide.
+      # ---------------------------------------------------------------------
+      - name: Build Release PR body
+        id: pr-body
+        if: steps.cs-version.outputs.has-changes == 'true'
         env:
-          GITHUB_TOKEN: ${{ steps.bot-token.outputs.token }}
+          VERSION: ${{ steps.cs-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          changelog_entry=$(awk -v v="${VERSION}" '
+            /^## / {
+              if (in_section) exit
+              if ($2 == v) { in_section = 1; next }
+            }
+            in_section { print }
+          ' CHANGELOG.md)
+
+          {
+            echo "body<<PR_BODY_EOF"
+            echo "## Release v${VERSION}"
+            echo ""
+            echo "This PR will publish \`jerling-org@${VERSION}\`. Merging will trigger build, test, tag, GitHub Release, and deploy to production."
+            echo ""
+            echo "${changelog_entry}"
+            echo "PR_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------------
+      # Commit and open/update the Release PR via the GitHub GraphQL API
+      # (createCommitOnBranch) so the commit is server-side signed and
+      # passes the "Require signed commits" rule on its own merits —
+      # without needing the bot's bypass privilege for that rule.
+      # ---------------------------------------------------------------------
+      - name: Open / update Release PR (signed commit)
+        id: pr
+        if: steps.cs-version.outputs.has-changes == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ steps.bot-token.outputs.token }}
+          sign-commits: true
+          branch: changeset-release/main
+          delete-branch: true
+          title: "Release: version packages"
+          commit-message: "release: version packages"
+          body: ${{ steps.pr-body.outputs.body }}
 
       # ---------------------------------------------------------------------
       # Auto-merge the Release PR using jerling-org-bot's bypass privilege.
@@ -71,21 +130,22 @@ jobs:
       # then re-triggers this workflow, which detects should-release=true
       # in the `detect` step below and runs the actual release.
       #
-      # Skipped when changesets/action did not produce a PR (i.e., the
+      # Skipped when no pending changesets were present (i.e., the
       # workflow ran on a release-ready commit and is about to release).
       # ---------------------------------------------------------------------
       - name: Auto-merge Release PR (bot bypass)
-        if: steps.changesets.outputs.pullRequestNumber != ''
+        if: steps.pr.outputs.pull-request-number != ''
         env:
           GH_TOKEN: ${{ steps.bot-token.outputs.token }}
-          PR_NUMBER: ${{ steps.changesets.outputs.pullRequestNumber }}
+          PR_NUMBER: ${{ steps.pr.outputs.pull-request-number }}
         run: |
           set -euo pipefail
           echo "Merging Release PR #${PR_NUMBER} via bot bypass."
           gh pr merge "${PR_NUMBER}" \
             --repo "${{ github.repository }}" \
             --squash \
-            --delete-branch
+            --delete-branch \
+            --admin
 
       - name: Detect whether this commit needs releasing
         id: detect
