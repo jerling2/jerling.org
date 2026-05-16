@@ -1,7 +1,7 @@
 {
   "name": "jerling-org",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "jerling.org static site, deployed to Firebase Hosting.",
   "type": "module",
   "engines": {
