@@ -1,1 +1,1 @@
-GitHub actions worked!
+deployed at: https://jerling.org
