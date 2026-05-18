@@ -56,3 +56,6 @@ pubsub-debug.log
 functions/node_modules/
 functions/lib/
 functions/.runtimeconfig.json
+bv_orchestration/checkpoint.sqlite
+bv_orchestration/checkpoint.sqlite-shm
+bv_orchestration/checkpoint.sqlite-wal
